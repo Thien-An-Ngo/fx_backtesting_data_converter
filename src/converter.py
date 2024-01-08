@@ -12,6 +12,7 @@ def find_inputs(data):
 	for i, v in enumerate(data):
 		if v[:8] == 'INPUT_1=':
 			first_input = i
+			break
 	return [[
 		float(row[first_input + n][8:]) if n < 9
 		else float(row[first_input + n][9:])
