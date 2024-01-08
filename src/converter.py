@@ -28,7 +28,6 @@ def extract_data_from_csv(filedir):
 			currency = reader[1][1]
 			reader.pop(0)
 			inputs = find_inputs(reader)
-			print(inputs)
 			data = [
 				[
 					int(row[0]),
