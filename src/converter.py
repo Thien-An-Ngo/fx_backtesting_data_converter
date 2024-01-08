@@ -4,7 +4,7 @@ import os
 from dotenv import load_dotenv
 
 from g_sheets_writer import write_sheet
-from src.g_copy_template_sheet import copy_file
+from g_copy_template_sheet import copy_file
 
 
 def extract_data_from_csv(filedir):
@@ -45,6 +45,7 @@ def main():
 	dirname: str = str(input("Enter dirname:\t"))
 	folder_path = os.path.join(os.path.dirname(__file__), os.pardir, "data", dirname)
 	data_folder = os.listdir(folder_path)
+
 	if not data_folder:
 		print("No data")
 	spreadsheet_id = copy_file(dirname)
