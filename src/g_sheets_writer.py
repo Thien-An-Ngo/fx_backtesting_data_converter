@@ -9,7 +9,7 @@ from g_credentials_login import g_credentials
 def write_sheet(data, sheet_id, spreadsheet_id="1Jce-DBqaNEopsqmNzqmXuSjUKmu_makXmjwVenqaZqM"):
 	creds = g_credentials()
 	try:
-		return write_data(data, f'{sheet_id}!A5', creds, spreadsheet_id)
+		return write_data(data, f'{sheet_id}!A4', creds, spreadsheet_id)
 	except HttpError as err:
 		print(err)
 
