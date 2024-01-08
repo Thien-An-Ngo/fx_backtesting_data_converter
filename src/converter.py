@@ -7,6 +7,18 @@ from g_sheets_writer import write_sheet
 from g_copy_template_sheet import copy_file
 
 
+def find_inputs(data):
+	first_input = 0
+	for i, v in enumerate(data):
+		if v[:8] == "INPUT_1=":
+			first_input = i
+	return [[
+		float(row[first_input + n][8:]) if n < 9
+		else float(row[first_input + n][9:])
+		for n in range(25)
+	] for row in data]
+
+
 def extract_data_from_csv(filedir):
 	try:
 		with open(filedir, 'r') as csvfile:
@@ -14,6 +26,7 @@ def extract_data_from_csv(filedir):
 			reader = [row for row in reader]
 			currency = reader[1][1]
 			reader.pop(0)
+			inputs = find_inputs(reader)
 			data = [
 				[
 					int(row[0]),
@@ -24,15 +37,9 @@ def extract_data_from_csv(filedir):
 					float(row[7]),
 					float(row[8]),
 					float(row[9]),
-					float(row[67][8:]),
-					float(row[68][8:]),
-					float(row[69][8:]),
-					float(row[70][8:]),
-					float(row[71][8:]),
-					float(row[72][8:]),
-					float(row[73][8:])
+					*inputs[i]
 				]
-				for row in reader
+				for i, row in enumerate(reader)
 			]
 		return {
 			"data": data,
