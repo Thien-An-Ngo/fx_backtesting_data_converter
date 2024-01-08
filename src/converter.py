@@ -25,7 +25,12 @@ def extract_data_from_csv(filedir):
 					float(row[8]),
 					float(row[9]),
 					float(row[67][8:]),
-					float(row[68][8:])
+					float(row[68][8:]),
+					float(row[69][8:]),
+					float(row[70][8:]),
+					float(row[71][8:]),
+					float(row[72][8:]),
+					float(row[73][8:])
 				]
 				for row in reader
 			]
