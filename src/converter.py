@@ -9,7 +9,7 @@ from g_sheets_writer import write_sheet
 
 def find_inputs(data):
 	first_input = 0
-	for i, v in enumerate(data):
+	for i, v in enumerate(data[0]):
 		if v[:8] == 'INPUT_1=':
 			first_input = i
 			break
@@ -28,6 +28,7 @@ def extract_data_from_csv(filedir):
 			currency = reader[1][1]
 			reader.pop(0)
 			inputs = find_inputs(reader)
+			print(inputs)
 			data = [
 				[
 					int(row[0]),
@@ -45,8 +46,8 @@ def extract_data_from_csv(filedir):
 		return {
 			'data': [
 				[
-					'Pass', 'Profit', 'Total', 'Trades', 'Profit',
-					'Factor', 'Expected', 'Payoff', 'Drawdown $',
+					'Pass', 'Profit', 'Total Trades', 'Profit Factor',
+					'Expected Payoff', 'Drawdown $',
 					'Drawdown %', 'OnTester W/L Ratio',
 					'Input 1', 'Input 2', 'Input 3', 'Input 4', 'Input 5', 'Input 6', 'Input 7', 'Input 8', 'Input 9',
 					'Input 10', 'Input 11', 'Input 12', 'Input 13', 'Input 14', 'Input 15', 'Input 16', 'Input 17',
@@ -69,16 +70,19 @@ def main():
 	folder_path = os.path.join(os.path.dirname(__file__), os.pardir, 'data', dirname)
 	data_folder = os.listdir(folder_path)
 
+	print('Fetching data...')
 	if not data_folder:
 		print('No data')
 	spreadsheet_id = copy_file(dirname)
-	print(data_folder)
+	print(f'Copied spreadsheet. id: {spreadsheet_id}')
+	result = None
 	for filename in data_folder:
 		if not filename.endswith('.csv'):
 			return
 		data = extract_data_from_csv(f'{folder_path}/{filename}')
 		result = write_sheet(data['data'], data['currency'], spreadsheet_id)
-		print(result)
+	if result:
+		print('Done!')
 
 
 if __name__ == '__main__':

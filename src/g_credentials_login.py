@@ -11,7 +11,6 @@ SCOPES = ["https://www.googleapis.com/auth/drive"]
 def g_credentials():
 	creds = None
 	path = os.path.join(os.path.dirname(__file__), os.pardir)
-	print('logging in')
 	if os.path.exists(f"{path}/token.json"):
 		creds = Credentials.from_authorized_user_file(f"{path}/token.json", SCOPES)
 	if not creds or not creds.valid:
