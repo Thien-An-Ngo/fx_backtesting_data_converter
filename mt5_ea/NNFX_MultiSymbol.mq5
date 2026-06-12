@@ -36,10 +36,18 @@
 //|  Dynamic (baseline), Waddah Attar Explosion (volume). No         |
 //|  downloads, no repainting. New defaults: McGinley(24) baseline,  |
 //|  SSL(10) C1, Vortex(14) C2, WAE volume.                          |
+//|                                                                  |
+//|  v1.20: NNFX money management tightened - ONE trade per          |
+//|  currency (VP's rule), max 4 concurrent trades, drawdown risk    |
+//|  throttle (reduced risk while equity is below its peak, never    |
+//|  increased - anti-martingale). Component speeds aligned into a   |
+//|  ladder (fast SSL(10) trigger -> mid McGinley(30) baseline ->    |
+//|  slow Aroon(30) regime gate) plus two chop filters: minimum      |
+//|  baseline slope and maximum signal-bar range.                    |
 //+------------------------------------------------------------------+
 #property copyright   "2026"
 #property link        "https://www.mql5.com"
-#property version     "1.10"
+#property version     "1.20"
 #property description "NNFX-style component system: Baseline / C1 / C2 / Volume / Exit slots,"
 #property description "ATR money management with split TP and runner trail, multi-symbol."
 
@@ -111,9 +119,12 @@ input bool            InpShowDashboard    = true;           // Show chart Commen
 
 input group "=== BASELINE slot ==="
 input ENUM_BASE_TYPE  InpBaselineType     = BASE_MCGINLEY;  // Baseline indicator
-input int             InpBaselinePeriod   = 24;             // Baseline period
+input int             InpBaselinePeriod   = 30;             // Baseline period
 input bool            InpUseBaselineEntry = true;           // Baseline cross is also an entry trigger
 input double          InpMaxBaseDistATR   = 1.0;            // "Too far gone": max |close-baseline| in ATR (0=off)
+input double          InpMinBaseSlopeATR  = 0.10;           // Chop filter: min baseline slope in ATR (0=off)
+input int             InpBaseSlopeBars    = 3;              // Bars for the slope measurement
+input double          InpMaxSignalBarATR  = 1.5;            // Chop filter: max signal-bar range in ATR (0=off)
 input string          InpBaseCustomName   = "";             // Custom baseline: indicator file name
 input int             InpBaseCustomBuffer = 0;              // Custom baseline: buffer index
 
@@ -125,8 +136,8 @@ input int             InpC1BufferA        = 0;              // C1 custom: buffer
 input int             InpC1BufferB        = 1;              // C1 custom: buffer B (2-line mode)
 
 input group "=== C2 slot (secondary confirmation) ==="
-input ENUM_CONF_TYPE  InpC2Type           = CONF_VORTEX;    // C2 indicator (CONF_OFF = disabled)
-input int             InpC2Period         = 14;             // C2 period (where applicable)
+input ENUM_CONF_TYPE  InpC2Type           = CONF_AROON;     // C2 indicator (CONF_OFF = disabled)
+input int             InpC2Period         = 30;             // C2 period (where applicable)
 input string          InpC2CustomName     = "";             // C2 custom: indicator file name
 input int             InpC2BufferA        = 0;              // C2 custom: buffer A
 input int             InpC2BufferB        = 1;              // C2 custom: buffer B (2-line mode)
@@ -153,6 +164,8 @@ input double          InpSARMax           = 0.2;            // SAR maximum
 
 input group "=== Money management (NNFX) ==="
 input double          InpRiskPercent      = 1.0;            // Total risk per trade, % (split over 2 halves)
+input double          InpDDThrottlePct    = 5.0;            // Throttle: equity this % below peak (0 = off)
+input double          InpDDThrottleFactor = 0.5;            // Throttle: risk multiplier while in drawdown
 input int             InpATRPeriod        = 14;             // ATR period
 input double          InpSL_ATR           = 1.5;            // Stop-loss (x ATR)
 input double          InpTP_ATR           = 1.0;            // Take-profit on half (x ATR) + breakeven trigger
@@ -163,8 +176,8 @@ input int             InpSlippagePoints   = 30;             // Max slippage / de
 input int             InpSignalTTLMin     = 240;            // Pending signal lifetime within its bar, minutes
 
 input group "=== Portfolio limits ==="
-input int             InpMaxTradesTotal   = 8;              // Max symbols in a trade at once
-input int             InpMaxPerCurrency   = 3;              // Max traded symbols sharing one currency (0 = off)
+input int             InpMaxTradesTotal   = 4;              // Max symbols in a trade at once (NNFX: 4)
+input int             InpMaxPerCurrency   = 1;              // Max traded symbols per currency (NNFX rule: 1)
 input double          InpMaxPortfolioRisk = 6.0;            // Max total open risk, % of equity
 
 input group "=== Equity protection ==="
@@ -925,6 +938,18 @@ bool ComputeSignal(const int i, const datetime curBar)
         { LogV(sym + ": volume filter failed - no entry"); continue; }
       if(InpMaxBaseDistATR > 0.0 && MathAbs(close1 - base1) > InpMaxBaseDistATR * atr)
         { LogV(sym + ": too far gone from baseline - no entry"); continue; }
+      if(InpMaxSignalBarATR > 0.0 && (r[0].high - r[0].low) > InpMaxSignalBarATR * atr)
+        { LogV(sym + ": signal bar too large (exhaustion) - no entry"); continue; }
+      if(InpMinBaseSlopeATR > 0.0)
+        {
+         double baseOld = 0.0;
+         if(!BaselineVal(i, 1 + InpBaseSlopeBars, baseOld)) return false;
+         double slope = base1 - baseOld;
+         bool flat = (dir > 0 ? slope <  InpMinBaseSlopeATR * atr
+                              : slope > -InpMinBaseSlopeATR * atr);
+         if(flat)
+           { LogV(sym + ": baseline too flat (chop) - no entry"); continue; }
+        }
 
       g_sym[i].pend.active  = true;
       g_sym[i].pend.dir     = dir;
@@ -1001,12 +1026,18 @@ void OpenSplitTrade(const string sym, const int dir, const double atr)
                                                            : price - InpTP_ATR * atr) : 0.0);
 
    double equity = AccountInfoDouble(ACCOUNT_EQUITY);
+   double riskPct = InpRiskPercent;
+   if(InpDDThrottlePct > 0.0 && equity <= g_peakEquity * (1.0 - InpDDThrottlePct / 100.0))
+     {
+      riskPct *= InpDDThrottleFactor;       // reduce risk in drawdown, never increase
+      LogV(StringFormat("%s: drawdown risk throttle active - risk %.2f%%", sym, riskPct));
+     }
    bool   split  = (InpUseSplitTP && !g_isNetting && InpTP_ATR > 0.0);
    ENUM_ORDER_TYPE otype = (dir > 0 ? ORDER_TYPE_BUY : ORDER_TYPE_SELL);
 
    if(split)
      {
-      double riskHalf = equity * (InpRiskPercent * 0.5) / 100.0;
+      double riskHalf = equity * (riskPct * 0.5) / 100.0;
       double lots = CalcLots(sym, slDist, riskHalf, otype, price);
       if(lots <= 0.0)
         { split = false; }                       // halves too small: single runner
@@ -1018,7 +1049,7 @@ void OpenSplitTrade(const string sym, const int dir, const double atr)
         }
      }
    // single runner with the full risk
-   double riskMoney = equity * InpRiskPercent / 100.0;
+   double riskMoney = equity * riskPct / 100.0;
    double lots = CalcLots(sym, slDist, riskMoney, otype, price);
    if(lots <= 0.0) return;
    SendOrder(sym, MagicB(), "NNFX-RUN", dir, lots, sl, 0.0);
@@ -1505,8 +1536,10 @@ void UpdateDashboard()
    s += StringFormat("Equity %.2f (peak %.2f)   Trades %d/%d   Pending %d   Open risk %.2f%% (cap %.2f%%)\n",
                      eq, g_peakEquity, CountEngagedSymbols(), InpMaxTradesTotal, pendCnt,
                      PortfolioOpenRiskPct(), InpMaxPortfolioRisk);
-   s += StringFormat("Halts - day: %s  week: %s  month: %s  EMERGENCY: %s   Symbols: %d\n",
-                     B2S(g_dayHalt), B2S(g_weekHalt), B2S(g_monthHalt), B2S(g_emergencyHalt),
+   bool throttled = (InpDDThrottlePct > 0.0 &&
+                     eq <= g_peakEquity * (1.0 - InpDDThrottlePct / 100.0));
+   s += StringFormat("Risk throttle: %s   Halts - day: %s  week: %s  month: %s  EMERGENCY: %s   Symbols: %d\n",
+                     B2S(throttled), B2S(g_dayHalt), B2S(g_weekHalt), B2S(g_monthHalt), B2S(g_emergencyHalt),
                      ArraySize(g_sym));
    Comment(s);
   }
