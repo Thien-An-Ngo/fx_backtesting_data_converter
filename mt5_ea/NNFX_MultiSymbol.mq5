@@ -30,10 +30,16 @@
 //|                                                                  |
 //|  Attach to ONE chart (recommended EURUSD D1). The EA trades      |
 //|  every symbol in InpSymbols.                                     |
+//|                                                                  |
+//|  v1.10: adds INTERNALLY COMPUTED NNFX community favourites -     |
+//|  SSL Channel, Aroon, Vortex (C1/C2), Hull MA and McGinley        |
+//|  Dynamic (baseline), Waddah Attar Explosion (volume). No         |
+//|  downloads, no repainting. New defaults: McGinley(24) baseline,  |
+//|  SSL(10) C1, Vortex(14) C2, WAE volume.                          |
 //+------------------------------------------------------------------+
 #property copyright   "2026"
 #property link        "https://www.mql5.com"
-#property version     "1.00"
+#property version     "1.10"
 #property description "NNFX-style component system: Baseline / C1 / C2 / Volume / Exit slots,"
 #property description "ATR money management with split TP and runner trail, multi-symbol."
 
@@ -58,7 +64,9 @@ enum ENUM_BASE_TYPE
    BASE_AMA    = 5,    // Kaufman AMA
    BASE_VIDYA  = 6,    // VIDYA
    BASE_FRAMA  = 7,    // FRAMA
-   BASE_CUSTOM = 8     // Custom indicator (iCustom)
+   BASE_CUSTOM = 8,    // Custom indicator (iCustom)
+   BASE_HMA    = 9,    // Hull MA (computed internally)
+   BASE_MCGINLEY = 10  // McGinley Dynamic (computed internally)
   };
 
 enum ENUM_CONF_TYPE
@@ -74,7 +82,10 @@ enum ENUM_CONF_TYPE
    CONF_RVI_CROSS    = 8,   // RVI main vs signal
    CONF_DEMARKER_50  = 9,   // DeMarker vs 0.5
    CONF_CUSTOM_ZERO  = 10,  // Custom: buffer A vs zero
-   CONF_CUSTOM_2LINE = 11   // Custom: buffer A vs buffer B
+   CONF_CUSTOM_2LINE = 11,  // Custom: buffer A vs buffer B
+   CONF_SSL          = 12,  // SSL Channel (computed internally)
+   CONF_AROON        = 13,  // Aroon up/down (computed internally)
+   CONF_VORTEX       = 14   // Vortex VI+/VI- (computed internally)
   };
 
 enum ENUM_VOL_TYPE
@@ -83,7 +94,8 @@ enum ENUM_VOL_TYPE
    VOL_ADX          = 1,    // ADX above threshold
    VOL_STDDEV_RISE  = 2,    // StdDev rising
    VOL_TICKVOL_MA   = 3,    // Tick volume above its average
-   VOL_CUSTOM       = 4     // Custom: buffer above threshold
+   VOL_CUSTOM       = 4,    // Custom: buffer above threshold
+   VOL_WAE          = 5     // Waddah Attar Explosion (computed internally)
   };
 
 //+------------------------------------------------------------------+
@@ -98,34 +110,39 @@ input bool            InpVerboseLog       = false;          // Verbose logging
 input bool            InpShowDashboard    = true;           // Show chart Comment() dashboard
 
 input group "=== BASELINE slot ==="
-input ENUM_BASE_TYPE  InpBaselineType     = BASE_KIJUN;     // Baseline indicator
-input int             InpBaselinePeriod   = 26;             // Baseline period
+input ENUM_BASE_TYPE  InpBaselineType     = BASE_MCGINLEY;  // Baseline indicator
+input int             InpBaselinePeriod   = 24;             // Baseline period
 input bool            InpUseBaselineEntry = true;           // Baseline cross is also an entry trigger
 input double          InpMaxBaseDistATR   = 1.0;            // "Too far gone": max |close-baseline| in ATR (0=off)
 input string          InpBaseCustomName   = "";             // Custom baseline: indicator file name
 input int             InpBaseCustomBuffer = 0;              // Custom baseline: buffer index
 
 input group "=== C1 slot (primary confirmation = the signal) ==="
-input ENUM_CONF_TYPE  InpC1Type           = CONF_DMI;       // C1 indicator
-input int             InpC1Period         = 14;             // C1 period (where applicable)
+input ENUM_CONF_TYPE  InpC1Type           = CONF_SSL;       // C1 indicator
+input int             InpC1Period         = 10;             // C1 period (where applicable)
 input string          InpC1CustomName     = "";             // C1 custom: indicator file name
 input int             InpC1BufferA        = 0;              // C1 custom: buffer A
 input int             InpC1BufferB        = 1;              // C1 custom: buffer B (2-line mode)
 
 input group "=== C2 slot (secondary confirmation) ==="
-input ENUM_CONF_TYPE  InpC2Type           = CONF_TRIX_ZERO; // C2 indicator (CONF_OFF = disabled)
-input int             InpC2Period         = 15;             // C2 period (where applicable)
+input ENUM_CONF_TYPE  InpC2Type           = CONF_VORTEX;    // C2 indicator (CONF_OFF = disabled)
+input int             InpC2Period         = 14;             // C2 period (where applicable)
 input string          InpC2CustomName     = "";             // C2 custom: indicator file name
 input int             InpC2BufferA        = 0;              // C2 custom: buffer A
 input int             InpC2BufferB        = 1;              // C2 custom: buffer B (2-line mode)
 
 input group "=== VOLUME slot ==="
-input ENUM_VOL_TYPE   InpVolType          = VOL_ADX;        // Volume/participation filter
+input ENUM_VOL_TYPE   InpVolType          = VOL_WAE;        // Volume/participation filter
 input int             InpVolPeriod        = 14;             // Volume indicator period
 input double          InpADXThreshold     = 20.0;           // ADX minimum (VOL_ADX)
 input string          InpVolCustomName    = "";             // Volume custom: indicator file name
 input int             InpVolCustomBuffer  = 0;              // Volume custom: buffer index
 input double          InpVolCustomThresh  = 0.0;            // Volume custom: minimum value
+input int             InpWAE_MacdFast     = 20;             // WAE: fast EMA period
+input int             InpWAE_MacdSlow     = 40;             // WAE: slow EMA period
+input int             InpWAE_BBPeriod     = 20;             // WAE: Bollinger period
+input double          InpWAE_BBDev        = 2.0;            // WAE: Bollinger deviation
+input double          InpWAE_Sensitivity  = 150.0;          // WAE: sensitivity
 
 input group "=== EXIT rules ==="
 input bool            InpExitOnC1Reverse  = true;           // Exit when C1 crosses against the position
@@ -199,6 +216,7 @@ struct SymState
    int               hC1;
    int               hC2;
    int               hVol;          // ADX / StdDev / custom (TICKVOL uses rates)
+   int               hVol2;         // WAE second handle (Bollinger Bands)
    int               hSAR;
    datetime          lastBar;
    Pending           pend;
@@ -305,6 +323,7 @@ void OnDeinit(const int reason)
       if(g_sym[i].hC1   != INVALID_HANDLE) IndicatorRelease(g_sym[i].hC1);
       if(g_sym[i].hC2   != INVALID_HANDLE) IndicatorRelease(g_sym[i].hC2);
       if(g_sym[i].hVol  != INVALID_HANDLE) IndicatorRelease(g_sym[i].hVol);
+      if(g_sym[i].hVol2 != INVALID_HANDLE) IndicatorRelease(g_sym[i].hVol2);
       if(g_sym[i].hSAR  != INVALID_HANDLE) IndicatorRelease(g_sym[i].hSAR);
      }
    Comment("");
@@ -340,8 +359,20 @@ int MakeBaselineHandle(const string s)
       case BASE_VIDYA:  return iVIDyA(s, InpTimeframe, 9, InpBaselinePeriod, 0, PRICE_CLOSE);
       case BASE_FRAMA:  return iFrAMA(s, InpTimeframe, InpBaselinePeriod, 0, PRICE_CLOSE);
       case BASE_CUSTOM: return iCustom(s, InpTimeframe, InpBaseCustomName);
+      case BASE_HMA:
+      case BASE_MCGINLEY: return INVALID_HANDLE;   // computed internally, no handle
      }
    return INVALID_HANDLE;
+  }
+
+bool BaseNeedsHandle()
+  {
+   return (InpBaselineType != BASE_HMA && InpBaselineType != BASE_MCGINLEY);
+  }
+
+bool ConfNeedsHandle(const ENUM_CONF_TYPE t)
+  {
+   return (t != CONF_OFF && t != CONF_SSL && t != CONF_AROON && t != CONF_VORTEX);
   }
 
 int MakeConfHandle(const string s, const ENUM_CONF_TYPE t, const int period, const string customName)
@@ -360,6 +391,9 @@ int MakeConfHandle(const string s, const ENUM_CONF_TYPE t, const int period, con
       case CONF_DEMARKER_50:  return iDeMarker(s, InpTimeframe, period);
       case CONF_CUSTOM_ZERO:
       case CONF_CUSTOM_2LINE: return iCustom(s, InpTimeframe, customName);
+      case CONF_SSL:
+      case CONF_AROON:
+      case CONF_VORTEX:       return INVALID_HANDLE;   // computed internally
      }
    return INVALID_HANDLE;
   }
@@ -373,6 +407,7 @@ int MakeVolHandle(const string s)
       case VOL_STDDEV_RISE: return iStdDev(s, InpTimeframe, InpVolPeriod, 0, MODE_SMA, PRICE_CLOSE);
       case VOL_TICKVOL_MA:  return INVALID_HANDLE;   // computed from rates directly
       case VOL_CUSTOM:      return iCustom(s, InpTimeframe, InpVolCustomName);
+      case VOL_WAE:         return iMACD(s, InpTimeframe, InpWAE_MacdFast, InpWAE_MacdSlow, 9, PRICE_CLOSE);
      }
    return INVALID_HANDLE;
   }
@@ -418,12 +453,18 @@ bool ParseSymbols()
       g_sym[added].hC1   = MakeConfHandle(s, InpC1Type, InpC1Period, InpC1CustomName);
       g_sym[added].hC2   = MakeConfHandle(s, InpC2Type, InpC2Period, InpC2CustomName);
       g_sym[added].hVol  = MakeVolHandle(s);
+      g_sym[added].hVol2 = (InpVolType == VOL_WAE
+                            ? iBands(s, InpTimeframe, InpWAE_BBPeriod, 0, InpWAE_BBDev, PRICE_CLOSE)
+                            : INVALID_HANDLE);
       g_sym[added].hSAR  = (InpUseSARExit ? iSAR(s, InpTimeframe, InpSARStep, InpSARMax) : INVALID_HANDLE);
 
-      bool bad = (g_sym[added].hATR == INVALID_HANDLE || g_sym[added].hBase == INVALID_HANDLE ||
-                  g_sym[added].hC1 == INVALID_HANDLE ||
-                  (InpC2Type != CONF_OFF && g_sym[added].hC2 == INVALID_HANDLE) ||
-                  (InpVolType != VOL_OFF && InpVolType != VOL_TICKVOL_MA && g_sym[added].hVol == INVALID_HANDLE) ||
+      bool volNeedsHandle = (InpVolType == VOL_ADX || InpVolType == VOL_STDDEV_RISE || InpVolType == VOL_CUSTOM);
+      bool bad = (g_sym[added].hATR == INVALID_HANDLE ||
+                  (BaseNeedsHandle() && g_sym[added].hBase == INVALID_HANDLE) ||
+                  (ConfNeedsHandle(InpC1Type) && g_sym[added].hC1 == INVALID_HANDLE) ||
+                  (ConfNeedsHandle(InpC2Type) && g_sym[added].hC2 == INVALID_HANDLE) ||
+                  (volNeedsHandle && g_sym[added].hVol == INVALID_HANDLE) ||
+                  (InpVolType == VOL_WAE && (g_sym[added].hVol == INVALID_HANDLE || g_sym[added].hVol2 == INVALID_HANDLE)) ||
                   (InpUseSARExit && g_sym[added].hSAR == INVALID_HANDLE));
       if(bad)
         {
@@ -560,10 +601,155 @@ bool GetBuf(const int handle, const int buffer, const int shift, double &val)
   }
 
 //+------------------------------------------------------------------+
+//| Internally computed NNFX community indicators (closed bars only) |
+//+------------------------------------------------------------------+
+// linearly weighted MA over arr[start..start+period-1] (series array)
+double LWMAAt(const double &arr[], const int start, const int period)
+  {
+   double num = 0.0, den = 0.0;
+   for(int k = 0; k < period; k++)
+     {
+      double w = period - k;
+      num += arr[start + k] * w;
+      den += w;
+     }
+   return (den > 0.0 ? num / den : 0.0);
+  }
+
+// Hull Moving Average at shift
+bool HMAValue(const string sym, const int period, const int shift, double &val)
+  {
+   int half = MathMax(1, period / 2);
+   int sq   = (int)MathMax(1.0, MathRound(MathSqrt((double)period)));
+   int need = shift + period + sq + 2;
+   double c[];
+   ArraySetAsSeries(c, true);
+   if(CopyClose(sym, InpTimeframe, 0, need, c) < need) return false;
+   double diff[];
+   ArrayResize(diff, sq);
+   for(int j = 0; j < sq; j++)
+      diff[j] = 2.0 * LWMAAt(c, shift + j, half) - LWMAAt(c, shift + j, period);
+   double num = 0.0, den = 0.0;
+   for(int k = 0; k < sq; k++)
+     {
+      double w = sq - k;
+      num += diff[k] * w;
+      den += w;
+     }
+   if(den <= 0.0) return false;
+   val = num / den;
+   return (val > 0.0);
+  }
+
+// McGinley Dynamic at shift (seeded with an SMA far back, iterated forward)
+bool McGinleyValue(const string sym, const int period, const int shift, double &val)
+  {
+   int hist = shift + period * 6 + 10;
+   double c[];
+   ArraySetAsSeries(c, true);
+   int got = CopyClose(sym, InpTimeframe, 0, hist, c);
+   if(got < shift + period + 10) return false;
+   double md = 0.0;
+   for(int k = got - period; k < got; k++) md += c[k];
+   md /= period;
+   for(int k = got - period - 1; k >= shift; k--)
+     {
+      if(md <= 0.0 || c[k] <= 0.0) return false;
+      double ratio = c[k] / md;
+      double denom = 0.6 * period * ratio * ratio * ratio * ratio;
+      if(denom < 1e-10) denom = 1e-10;
+      md += (c[k] - md) / denom;
+     }
+   val = md;
+   return (val > 0.0);
+  }
+
+// SSL Channel direction at shift: +1 long side, -1 short side
+bool SSLDir(const string sym, const int period, const int shift, int &dir)
+  {
+   int seed = 150;                        // bars to settle the recursive Hlv state
+   double hi[], lo[], cl[];
+   ArraySetAsSeries(hi, true);
+   ArraySetAsSeries(lo, true);
+   ArraySetAsSeries(cl, true);
+   int need = shift + seed + period + 2;
+   int g1 = CopyHigh(sym, InpTimeframe, 0, need, hi);
+   int g2 = CopyLow(sym, InpTimeframe, 0, need, lo);
+   int g3 = CopyClose(sym, InpTimeframe, 0, need, cl);
+   int got = MathMin(g1, MathMin(g2, g3));
+   if(got < shift + period + 5) return false;
+   int start = got - period - 1;          // oldest evaluable bar
+   int hlv = 0;
+   for(int b = start; b >= shift; b--)
+     {
+      double smaH = 0.0, smaL = 0.0;
+      for(int k = 0; k < period; k++)
+        {
+         smaH += hi[b + k];
+         smaL += lo[b + k];
+        }
+      smaH /= period;
+      smaL /= period;
+      if(cl[b] > smaH) hlv = 1;
+      else if(cl[b] < smaL) hlv = -1;     // otherwise keep previous state
+     }
+   dir = hlv;
+   return true;
+  }
+
+// Aroon direction at shift
+bool AroonDir(const string sym, const int period, const int shift, int &dir)
+  {
+   double hi[], lo[];
+   ArraySetAsSeries(hi, true);
+   ArraySetAsSeries(lo, true);
+   int need = shift + period + 2;
+   if(CopyHigh(sym, InpTimeframe, 0, need, hi) < need) return false;
+   if(CopyLow(sym, InpTimeframe, 0, need, lo) < need) return false;
+   int hIdx = shift, lIdx = shift;
+   for(int k = shift; k <= shift + period; k++)
+     {
+      if(hi[k] > hi[hIdx]) hIdx = k;
+      if(lo[k] < lo[lIdx]) lIdx = k;
+     }
+   double up   = 100.0 * (period - (hIdx - shift)) / period;
+   double down = 100.0 * (period - (lIdx - shift)) / period;
+   dir = (up > down ? 1 : (up < down ? -1 : 0));
+   return true;
+  }
+
+// Vortex direction at shift: VI+ vs VI-
+bool VortexDir(const string sym, const int period, const int shift, int &dir)
+  {
+   double hi[], lo[], cl[];
+   ArraySetAsSeries(hi, true);
+   ArraySetAsSeries(lo, true);
+   ArraySetAsSeries(cl, true);
+   int need = shift + period + 2;
+   if(CopyHigh(sym, InpTimeframe, 0, need, hi) < need) return false;
+   if(CopyLow(sym, InpTimeframe, 0, need, lo) < need) return false;
+   if(CopyClose(sym, InpTimeframe, 0, need, cl) < need) return false;
+   double vip = 0.0, vim = 0.0, tr = 0.0;
+   for(int b = shift; b < shift + period; b++)
+     {
+      vip += MathAbs(hi[b] - lo[b + 1]);
+      vim += MathAbs(lo[b] - hi[b + 1]);
+      tr  += MathMax(hi[b] - lo[b], MathMax(MathAbs(hi[b] - cl[b + 1]), MathAbs(lo[b] - cl[b + 1])));
+     }
+   if(tr <= 0.0) return false;
+   dir = (vip > vim ? 1 : (vip < vim ? -1 : 0));
+   return true;
+  }
+
+//+------------------------------------------------------------------+
 //| Baseline value at shift                                          |
 //+------------------------------------------------------------------+
 bool BaselineVal(const int i, const int shift, double &val)
   {
+   if(InpBaselineType == BASE_HMA)
+      return HMAValue(g_sym[i].name, InpBaselinePeriod, shift, val);
+   if(InpBaselineType == BASE_MCGINLEY)
+      return McGinleyValue(g_sym[i].name, InpBaselinePeriod, shift, val);
    int buffer = 0;
    if(InpBaselineType == BASE_KIJUN)  buffer = 1;                    // KIJUNSEN line
    if(InpBaselineType == BASE_CUSTOM) buffer = InpBaseCustomBuffer;
@@ -618,10 +804,30 @@ bool ConfDir(const int handle, const ENUM_CONF_TYPE t, const int bufA, const int
   }
 
 //+------------------------------------------------------------------+
-//| Volume/participation filter at shift 1                           |
+//| Confirmation direction for slot C1/C2 at shift (any type)        |
+//+------------------------------------------------------------------+
+bool ConfDirAt(const int i, const bool isC1, const int shift, int &dir)
+  {
+   ENUM_CONF_TYPE t = (isC1 ? InpC1Type : InpC2Type);
+   int    period = (isC1 ? InpC1Period  : InpC2Period);
+   int    handle = (isC1 ? g_sym[i].hC1 : g_sym[i].hC2);
+   int    bufA   = (isC1 ? InpC1BufferA : InpC2BufferA);
+   int    bufB   = (isC1 ? InpC1BufferB : InpC2BufferB);
+   string sym    = g_sym[i].name;
+   switch(t)
+     {
+      case CONF_SSL:    return SSLDir(sym, period, shift, dir);
+      case CONF_AROON:  return AroonDir(sym, period, shift, dir);
+      case CONF_VORTEX: return VortexDir(sym, period, shift, dir);
+      default:          return ConfDir(handle, t, bufA, bufB, shift, dir);
+     }
+  }
+
+//+------------------------------------------------------------------+
+//| Volume/participation filter at shift 1 (dir used by WAE)         |
 //| Returns: 1 pass, 0 fail, -1 data not ready                       |
 //+------------------------------------------------------------------+
-int VolumePass(const int i)
+int VolumePass(const int i, const int dir)
   {
    string sym = g_sym[i].name;
    double a = 0.0, b = 0.0;
@@ -649,6 +855,18 @@ int VolumePass(const int i)
       case VOL_CUSTOM:
          if(!GetBuf(g_sym[i].hVol, InpVolCustomBuffer, 1, a)) return -1;
          return (a >= InpVolCustomThresh ? 1 : 0);
+      case VOL_WAE:
+        {
+         // Waddah Attar Explosion: MACD impulse vs Bollinger band width
+         double m1 = 0.0, m2 = 0.0, bu = 0.0, bl = 0.0;
+         if(!GetBuf(g_sym[i].hVol, 0, 1, m1) || !GetBuf(g_sym[i].hVol, 0, 2, m2)) return -1;
+         if(!GetBuf(g_sym[i].hVol2, 1, 1, bu) || !GetBuf(g_sym[i].hVol2, 2, 1, bl)) return -1;
+         double t1 = (m1 - m2) * InpWAE_Sensitivity;   // trend impulse
+         double e1 = bu - bl;                          // explosion line
+         if(dir > 0 && t1 <= 0.0) return 0;            // impulse must match direction
+         if(dir < 0 && t1 >= 0.0) return 0;
+         return (MathAbs(t1) > e1 ? 1 : 0);
+        }
      }
    return 0;
   }
@@ -674,12 +892,12 @@ bool ComputeSignal(const int i, const datetime curBar)
    if(!BaselineVal(i, 1, base1) || !BaselineVal(i, 2, base2)) return false;
 
    int c1d1 = 0, c1d2 = 0;
-   if(!ConfDir(g_sym[i].hC1, InpC1Type, InpC1BufferA, InpC1BufferB, 1, c1d1)) return false;
-   if(!ConfDir(g_sym[i].hC1, InpC1Type, InpC1BufferA, InpC1BufferB, 2, c1d2)) return false;
+   if(!ConfDirAt(i, true, 1, c1d1)) return false;
+   if(!ConfDirAt(i, true, 2, c1d2)) return false;
 
    int c2d1 = 0;
    if(InpC2Type != CONF_OFF)
-      if(!ConfDir(g_sym[i].hC2, InpC2Type, InpC2BufferA, InpC2BufferB, 1, c2d1)) return false;
+      if(!ConfDirAt(i, false, 1, c2d1)) return false;
 
    MqlRates r[];
    ArraySetAsSeries(r, true);
@@ -693,9 +911,6 @@ bool ComputeSignal(const int i, const datetime curBar)
    int side1 = (close1 > base1 ? 1 : (close1 < base1 ? -1 : 0));
    int side2 = (close2 > base2 ? 1 : (close2 < base2 ? -1 : 0));
 
-   int volPass = VolumePass(i);
-   if(volPass < 0) return false;
-
    for(int dir = 1; dir >= -1; dir -= 2)
      {
       bool c1Cross   = (c1d1 == dir && c1d2 != dir);
@@ -704,6 +919,8 @@ bool ComputeSignal(const int i, const datetime curBar)
       if(!trigger) continue;
       if(InpC2Type != CONF_OFF && c2d1 != dir)
         { LogV(sym + ": C2 disagrees - no entry"); continue; }
+      int volPass = VolumePass(i, dir);
+      if(volPass < 0) return false;
       if(volPass == 0)
         { LogV(sym + ": volume filter failed - no entry"); continue; }
       if(InpMaxBaseDistATR > 0.0 && MathAbs(close1 - base1) > InpMaxBaseDistATR * atr)
@@ -847,8 +1064,8 @@ bool ManageOpen(const int i)
    int c1d1 = 0, c1d2 = 0;
    if(InpExitOnC1Reverse)
      {
-      if(!ConfDir(g_sym[i].hC1, InpC1Type, InpC1BufferA, InpC1BufferB, 1, c1d1)) return false;
-      if(!ConfDir(g_sym[i].hC1, InpC1Type, InpC1BufferA, InpC1BufferB, 2, c1d2)) return false;
+      if(!ConfDirAt(i, true, 1, c1d1)) return false;
+      if(!ConfDirAt(i, true, 2, c1d2)) return false;
      }
 
    MqlRates r[];
