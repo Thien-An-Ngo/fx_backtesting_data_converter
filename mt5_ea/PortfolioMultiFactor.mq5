@@ -33,10 +33,16 @@
 //|                                                                  |
 //|  Attach to ONE chart (recommended EURUSD D1). The EA trades     |
 //|  every symbol in InpSymbols.                                    |
+//|                                                                  |
+//|  v3.10: XS/CY positions now trail their stops on closed bars    |
+//|  (banks floating profit into balance and guards against         |
+//|  carry-crash give-back), and TF entries are skipped when the    |
+//|  direction PAYS more than InpTF_MaxPayAnnualPct swap per year   |
+//|  (financing drag on multi-week trend holds).                    |
 //+------------------------------------------------------------------+
 #property copyright   "2026"
 #property link        "https://www.mql5.com"
-#property version     "3.00"
+#property version     "3.10"
 #property description "FX factor portfolio: carry + cross-sectional momentum + trend following,"
 #property description "ATR-normalized risk, weekly factor rebalance, portfolio-level protection."
 
@@ -75,6 +81,7 @@ input bool            InpTF_UseEMAFilter  = true;           // TF: trade only wi
 input double          InpTF_RiskPercent   = 0.4;            // TF: risk per trade, % of equity
 input double          InpTF_SL_ATR        = 3.0;            // TF: initial stop (x ATR)
 input double          InpTF_Trail_ATR     = 4.0;            // TF: chandelier trail (x ATR, 0 = off)
+input double          InpTF_MaxPayAnnualPct = 8.0;          // TF: skip entries paying > this %/yr swap (0 = off)
 input int             InpTF_MaxPositions  = 8;              // TF: max open positions
 input bool            InpTF_AllowLong     = true;           // TF: allow longs
 input bool            InpTF_AllowShort    = true;           // TF: allow shorts
@@ -86,6 +93,7 @@ input double          InpXS_MinScore      = 1.0;            // XS: min strength 
 input int             InpXS_MaxPositions  = 4;              // XS: max open positions
 input double          InpXS_RiskPercent   = 0.4;            // XS: risk per trade, % of equity
 input double          InpXS_SL_ATR        = 3.0;            // XS: stop-loss (x ATR)
+input double          InpXS_Trail_ATR     = 4.0;            // XS: chandelier trail (x ATR, 0 = off)
 
 input group "=== CY module: carry ==="
 input double          InpCY_MinAnnualPct  = 1.0;            // CY: min earned swap, % per year
@@ -94,6 +102,7 @@ input bool            InpCY_UseTrendFilter= true;           // CY: don't hold ca
 input int             InpCY_MaxPositions  = 6;              // CY: max open positions
 input double          InpCY_RiskPercent   = 0.4;            // CY: risk per trade, % of equity
 input double          InpCY_SL_ATR        = 4.0;            // CY: stop-loss (x ATR, wide)
+input double          InpCY_Trail_ATR     = 6.0;            // CY: wide trail to bank carry gains (x ATR, 0 = off)
 
 input group "=== Shared signal settings ==="
 input int             InpATRPeriod        = 20;             // ATR period
@@ -477,6 +486,7 @@ void ProcessSymbol(const int i)
    if(curBar != g_sym[i].lastBar)
      {
       if(!ManageTrend(i)) return;            // data not ready -> retry, don't latch
+      if(!ManageFactorTrails(i)) return;     // trail XS/CY stops on closed bars
       if(InpUseTrendModule)
         {
          if(!ComputeTrendSignal(i, curBar)) return;
@@ -542,6 +552,17 @@ bool ComputeTrendSignal(const int i, const datetime curBar)
      }
    bool longOK  = InpTF_AllowLong  && closed > hh && (!InpTF_UseEMAFilter || closed > ema);
    bool shortOK = InpTF_AllowShort && closed < ll && (!InpTF_UseEMAFilter || closed < ema);
+   if((longOK || shortOK) && InpTF_MaxPayAnnualPct > 0.0)
+     {
+      // financing drag filter: multi-week trend holds bleed swap if the
+      // direction pays heavily (e.g. long crypto, short high-yielders)
+      double carry = 0.0;
+      if(CarryAnnualPct(sym, longOK, carry) && carry < -InpTF_MaxPayAnnualPct)
+        {
+         LogV(StringFormat("%s: TF entry would pay %.1f%%/yr swap - skipped", sym, -carry));
+         return true;
+        }
+     }
    if(longOK || shortOK)
      {
       g_sym[i].pTF.active  = true;
@@ -1030,6 +1051,69 @@ bool ManageTrend(const int i)
             double lo = (idx >= 0 ? iLow(sym, InpTimeframe, idx) : 0.0);
             if(lo > 0.0) newSL = BetterSL(type, newSL, lo + InpTF_Trail_ATR * atr);
            }
+        }
+
+      double eps = tickSize * 0.5;
+      bool improved = (sl <= 0.0 && newSL > 0.0) ||
+                      (type == POSITION_TYPE_BUY  ? newSL > sl + eps
+                                                  : (sl > 0.0 && newSL < sl - eps));
+      if(improved)
+         TryModifySL(sym, tk, type, newSL, tp, tick);
+     }
+   return true;
+  }
+
+//+------------------------------------------------------------------+
+//| XS/CY trailing: chandelier stops for factor positions (closed    |
+//| bars). Banks floating profit into balance over time and caps     |
+//| give-back when a long-held carry/momentum trend reverses.        |
+//| Returns false only when required data is not ready yet.          |
+//+------------------------------------------------------------------+
+bool ManageFactorTrails(const int i)
+  {
+   if(!InpUseXSMomModule && !InpUseCarryModule) return true;
+   if(InpXS_Trail_ATR <= 0.0 && InpCY_Trail_ATR <= 0.0) return true;
+   string sym = g_sym[i].name;
+   if(CountPositions(sym, MagicXS()) == 0 && CountPositions(sym, MagicCY()) == 0) return true;
+
+   double atr = 0.0;
+   if(!GetValue(g_sym[i].hATR, atr) || atr <= 0.0) return false;
+   MqlTick tick;
+   if(!SymbolInfoTick(sym, tick) || tick.bid <= 0.0 || tick.ask <= 0.0) return false;
+   double tickSize = SymbolInfoDouble(sym, SYMBOL_TRADE_TICK_SIZE);
+   if(tickSize <= 0.0) tickSize = SymbolInfoDouble(sym, SYMBOL_POINT);
+
+   for(int p = PositionsTotal() - 1; p >= 0; p--)
+     {
+      ulong tk = PositionGetTicket(p);
+      if(tk == 0) continue;
+      long m = PositionGetInteger(POSITION_MAGIC);
+      double trailATR = 0.0;
+      if(m == MagicXS())      trailATR = InpXS_Trail_ATR;
+      else if(m == MagicCY()) trailATR = InpCY_Trail_ATR;
+      else continue;
+      if(trailATR <= 0.0) continue;
+      if(PositionGetString(POSITION_SYMBOL) != sym) continue;
+
+      ENUM_POSITION_TYPE type = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
+      double   sl    = PositionGetDouble(POSITION_SL);
+      double   tp    = PositionGetDouble(POSITION_TP);
+      datetime opent = (datetime)PositionGetInteger(POSITION_TIME);
+      int shOpen = iBarShift(sym, InpTimeframe, opent);
+      if(shOpen < 1) continue;              // entry bar not closed yet
+
+      double newSL = sl;
+      if(type == POSITION_TYPE_BUY)
+        {
+         int idx = iHighest(sym, InpTimeframe, MODE_HIGH, shOpen, 1);
+         double hh = (idx >= 0 ? iHigh(sym, InpTimeframe, idx) : 0.0);
+         if(hh > 0.0) newSL = BetterSL(type, newSL, hh - trailATR * atr);
+        }
+      else
+        {
+         int idx = iLowest(sym, InpTimeframe, MODE_LOW, shOpen, 1);
+         double lo = (idx >= 0 ? iLow(sym, InpTimeframe, idx) : 0.0);
+         if(lo > 0.0) newSL = BetterSL(type, newSL, lo + trailATR * atr);
         }
 
       double eps = tickSize * 0.5;
